@@ -1,0 +1,13 @@
+{
+  "confusion_matrix": [
+    [
+      516,
+      5
+    ],
+    [
+      13,
+      266
+    ]
+  ],
+  "layout": "rows are actual [0, 1], columns are predicted [0, 1]"
+}
