@@ -1,8 +1,9 @@
 """
-Streamlit dashboard for the local irrigation demo.
+Streamlit dashboard for the irrigation demo.
 
-Sensor values come from sensor_simulator.py. Predictions come from the joblib
-model through edge_inference.py. MLflow can stay closed while this app runs.
+Sensor values are simulated on this laptop. Each reading is sent to the
+model deployed in Azure Machine Learning, and the prediction comes back
+from that endpoint.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
-from edge_inference import IrrigationPredictor, load_metrics
+from azure_source import AzureEndpointClient, AzureSourceError, load_azure_model_and_metrics
 from sensor_simulator import SCENARIOS, SensorSimulator
 
 HISTORY_LIMIT = 45
@@ -28,10 +29,9 @@ st.set_page_config(
 
 
 @st.cache_resource
-def load_predictor(model_mtime: float) -> IrrigationPredictor:
-    # model_mtime is part of the cache key, so a retrain is picked up on refresh.
-    del model_mtime
-    return IrrigationPredictor()
+def load_azure_context() -> tuple[AzureEndpointClient, dict, dict]:
+    """Connect once per dashboard process. Each reading is still sent to Azure."""
+    return load_azure_model_and_metrics()
 
 
 def init_state() -> None:
@@ -41,7 +41,7 @@ def init_state() -> None:
         st.session_state.simulator = SensorSimulator()
 
 
-def append_reading(predictor: IrrigationPredictor, scenario: str) -> None:
+def append_reading(predictor: AzureEndpointClient, scenario: str) -> None:
     reading = st.session_state.simulator.read(scenario)
     prediction = predictor.predict_reading(reading)
     st.session_state.history.append({**reading, **prediction})
@@ -113,20 +113,18 @@ def confusion_chart(matrix: list) -> go.Figure:
 @st.fragment(run_every=READING_INTERVAL)
 def live_panel() -> None:
     """Refresh the sensor panel every 2 seconds without restarting the page."""
-    from edge_inference import MODEL_PATH
-
-    predictor = load_predictor(MODEL_PATH.stat().st_mtime)
-    render_live(predictor, st.session_state.scenario, st.session_state.running)
+    predictor, _metrics, _info = load_azure_context()
+    try:
+        render_live(predictor, st.session_state.scenario, st.session_state.running)
+    except AzureSourceError as exc:
+        st.error(str(exc))
 
 
 def render_evaluation(metrics: dict | None) -> None:
     st.subheader("Held-out test results")
-    if metrics is None:
-        st.info("metrics.json was not found. Run train_model.py to create it.")
-        return
-
     st.caption(
-        "These scores measure the model on simulated rows it did not train on. "
+        "These scores were logged by Azure ML job "
+        f"{metrics['job_name']} in workspace {metrics['workspace_name']}. "
         "They are not accuracy on a real farm."
     )
     accuracy, precision, recall, f1 = st.columns(4)
@@ -142,7 +140,7 @@ def render_evaluation(metrics: dict | None) -> None:
     st.caption(metrics.get("confusion_matrix_layout", ""))
 
 
-def render_live(predictor: IrrigationPredictor, scenario: str, running: bool) -> None:
+def render_live(predictor: AzureEndpointClient, scenario: str, running: bool) -> None:
     if running:
         append_reading(predictor, scenario)
 
@@ -150,7 +148,7 @@ def render_live(predictor: IrrigationPredictor, scenario: str, running: bool) ->
     if not history:
         st.info(
             "Turn on live simulation in the sidebar. A new simulated reading "
-            "is created every 2 seconds, then scored on this laptop."
+            "is sent to the Azure ML endpoint every 2 seconds."
         )
         return
 
@@ -177,7 +175,8 @@ def render_live(predictor: IrrigationPredictor, scenario: str, running: bool) ->
     )
     confidence.metric("Prediction confidence", f"{latest['confidence']:.1%}")
     st.caption(
-        f"Source: {latest['data_source']} sensor values. "
+        "Sensor values are simulated on this laptop and sent to the deployed model. "
+        "The prediction is the response from Azure Machine Learning. "
         f"Scenario: {SCENARIOS[latest['scenario']]['title']}. "
         f"Reading time: {latest['timestamp']}."
     )
@@ -226,34 +225,24 @@ def main() -> None:
     st.title("Smart Agriculture AI Irrigation Prediction System")
     st.markdown(
         "Predict whether a field needs irrigation from **simulated** IoT readings. "
-        "The Random Forest runs on this laptop."
+        "Each reading is sent to the model **deployed in Azure Machine Learning**. "
+        "The model is not downloaded onto this laptop."
     )
     st.warning(
         "Simulated data only. These are not measurements from real sensors or a "
         "real farm, and this dashboard does not control irrigation equipment."
     )
 
-    from edge_inference import MODEL_PATH
-
-    if not MODEL_PATH.is_file():
-        st.error(
-            "Trained model not found at models/irrigation_rf_model.joblib. "
-            "Generate the dataset and train the model first."
-        )
+    try:
+        _predictor, metrics, azure_info = load_azure_context()
+    except (AzureSourceError, FileNotFoundError, ValueError) as exc:
+        st.error(str(exc))
         st.code(
-            ".\\.venv\\Scripts\\python.exe generate_dataset.py\n"
-            ".\\.venv\\Scripts\\python.exe train_model.py",
+            'az account set --subscription "Azure for Students"\n'
+            "az account show --query \"{subscription:name, user:user.name}\" --output table",
             language="powershell",
         )
         st.stop()
-
-    try:
-        load_predictor(MODEL_PATH.stat().st_mtime)
-    except (FileNotFoundError, ValueError) as exc:
-        st.error(str(exc))
-        st.stop()
-
-    metrics = load_metrics()
 
     with st.sidebar:
         st.header("Simulation controls")
@@ -275,15 +264,14 @@ def main() -> None:
             st.session_state.history = []
             st.session_state.simulator = SensorSimulator()
 
-        st.header("Model")
-        st.write("Algorithm: Random Forest")
-        if metrics:
-            st.write(f"Test accuracy: {metrics['accuracy']:.1%}")
-            version = metrics.get("mlflow_model_version")
-            if version:
-                st.write(f"MLflow model version: {version}")
-                st.caption("MLflow alias: champion")
-        st.caption("Predictions load models/irrigation_rf_model.joblib. MLflow can be closed.")
+        st.header("Azure ML endpoint")
+        st.write(f"Subscription: {azure_info['subscription_name']}")
+        st.write(f"Workspace: {azure_info['workspace_name']}")
+        st.write(f"Endpoint: {azure_info['endpoint_name']}")
+        st.write(f"Deployment: {azure_info['deployment_name']}")
+        st.write(f"Model: {azure_info['model_name']} v{azure_info['model_version']}")
+        st.write(f"Test accuracy: {metrics['accuracy']:.1%}")
+        st.caption("Each live reading is posted to this endpoint. The model stays in Azure.")
 
     live_panel()
 

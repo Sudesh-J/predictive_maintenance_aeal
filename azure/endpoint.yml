@@ -1,0 +1,7 @@
+$schema: https://azuremlschemas.azureedge.net/latest/managedOnlineEndpoint.schema.json
+name: aeal-irrig-score
+auth_mode: key
+description: Scores simulated irrigation readings with the registered Random Forest. Does not control equipment.
+tags:
+  data_source: simulated
+  purpose: college-submission

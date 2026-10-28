@@ -1,0 +1,13 @@
+name: irrigation-score
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+      - numpy==2.2.6
+      - pandas==2.2.3
+      - scikit-learn==1.6.1
+      - mlflow==2.22.5
+      - cloudpickle==3.1.1
+      - azureml-inference-server-http

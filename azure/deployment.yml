@@ -1,0 +1,19 @@
+$schema: https://azuremlschemas.azureedge.net/latest/managedOnlineDeployment.schema.json
+name: blue
+endpoint_name: aeal-irrig-score
+model: azureml:smart-agri-irrigation-predictor:1
+code_configuration:
+  code: ./score
+  scoring_script: score.py
+environment:
+  image: mcr.microsoft.com/azureml/openmpi4.1.0-ubuntu22.04:latest
+  conda_file: ./score/conda.yml
+instance_type: Standard_DS2_v2
+instance_count: 1
+request_settings:
+  request_timeout_ms: 15000
+  max_concurrent_requests_per_instance: 1
+app_insights_enabled: false
+tags:
+  data_source: simulated
+  purpose: college-submission

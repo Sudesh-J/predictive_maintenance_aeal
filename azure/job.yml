@@ -1,0 +1,29 @@
+$schema: https://azuremlschemas.azureedge.net/latest/commandJob.schema.json
+type: command
+display_name: irrigation-random-forest
+experiment_name: smart_agriculture_irrigation
+description: >-
+  Train a Random Forest on the simulated irrigation dataset and register it
+  in the Azure Machine Learning workspace. This does not control real equipment.
+code: ..
+command: >-
+  python train_model.py
+  --data ${{inputs.training_data}}
+  --model-dir ${{outputs.model_dir}}
+inputs:
+  training_data:
+    type: uri_file
+    path: ../data/agriculture_sensor_data.csv
+outputs:
+  model_dir:
+    type: uri_folder
+    mode: rw_mount
+environment:
+  image: mcr.microsoft.com/azureml/openmpi4.1.0-ubuntu22.04:latest
+  conda_file: conda.yml
+resources:
+  instance_type: Standard_DS2_v2
+  instance_count: 1
+tags:
+  data_source: simulated
+  purpose: college-submission

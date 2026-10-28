@@ -1,9 +1,8 @@
 """
-Load the saved Random Forest and score one sensor reading on this laptop.
+Score one sensor reading with a scikit-learn model.
 
-Prediction uses the local joblib file. MLflow does not need to be running,
-and no cloud prediction service is called. The result is a recommendation
-only: this module never switches a pump, valve, or relay.
+The dashboard sends readings to the Azure Machine Learning endpoint.
+This module never switches a pump, valve, or relay.
 """
 
 from __future__ import annotations
@@ -24,17 +23,8 @@ TARGET_COLUMN = "irrigation_required"
 
 
 class IrrigationPredictor:
-    def __init__(self, model_path: Path = MODEL_PATH) -> None:
-        self.model_path = Path(model_path)
-        if not self.model_path.is_file():
-            raise FileNotFoundError(
-                "Trained model not found at "
-                f"{self.model_path}. From the project folder run:\n"
-                "  .\\.venv\\Scripts\\python.exe generate_dataset.py\n"
-                "  .\\.venv\\Scripts\\python.exe train_model.py"
-            )
-
-        self.model = joblib.load(self.model_path)
+    def __init__(self, model) -> None:
+        self.model = model
         expected = getattr(self.model, "n_features_in_", None)
         if expected is not None and int(expected) != len(FEATURE_COLUMNS):
             raise ValueError(
@@ -50,6 +40,20 @@ class IrrigationPredictor:
                 "Regenerate the dataset and train again."
             )
         self._required_index = classes.index(1)
+
+    @classmethod
+    def from_estimator(cls, model) -> "IrrigationPredictor":
+        return cls(model)
+
+    @classmethod
+    def from_joblib(cls, model_path: Path = MODEL_PATH) -> "IrrigationPredictor":
+        path = Path(model_path)
+        if not path.is_file():
+            raise FileNotFoundError(
+                "Trained model not found at "
+                f"{path}. The dashboard loads the model from Azure ML instead."
+            )
+        return cls(joblib.load(path))
 
     def predict_reading(self, reading: dict) -> dict:
         missing = [column for column in FEATURE_COLUMNS if column not in reading]
@@ -80,11 +84,16 @@ def load_metrics(path: Path = METRICS_PATH) -> dict | None:
 
 
 def main() -> None:
-    """Score one fresh simulated reading from each scenario."""
+    """Score one fresh simulated reading from each scenario with the Azure model."""
+    from azure_source import load_azure_model_and_metrics
     from sensor_simulator import SCENARIOS, SensorSimulator
 
-    print("Local edge inference demo. No hardware is connected.")
-    predictor = IrrigationPredictor()
+    print("Sending sample readings to the Azure Machine Learning endpoint.")
+    predictor, _metrics, info = load_azure_model_and_metrics()
+    print(
+        f"Endpoint {info['endpoint_name']} in workspace {info['workspace_name']} "
+        f"is serving {info['model_name']} version {info['model_version']}."
+    )
     simulator = SensorSimulator(seed=7)
 
     for scenario in SCENARIOS:

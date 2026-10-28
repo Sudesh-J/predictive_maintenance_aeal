@@ -8,7 +8,9 @@ without starting the MLflow server.
 
 from __future__ import annotations
 
+import argparse
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -51,15 +53,21 @@ MODEL_PARAMS = {
 }
 
 
-def _load_training_frame() -> pd.DataFrame:
-    if not DATA_PATH.is_file():
+def _running_in_azure_ml() -> bool:
+    """True when Azure ML started this script and injected its tracking URI."""
+    tracking_uri = os.environ.get("MLFLOW_TRACKING_URI", "")
+    return bool(os.environ.get("AZUREML_RUN_ID")) or tracking_uri.startswith("azureml")
+
+
+def _load_training_frame(data_path: Path) -> pd.DataFrame:
+    if not data_path.is_file():
         raise SystemExit(
             "Dataset not found at "
-            f"{DATA_PATH}. From the project folder run:\n"
+            f"{data_path}. From the project folder run:\n"
             "  .\\.venv\\Scripts\\python.exe generate_dataset.py"
         )
 
-    data = pd.read_csv(DATA_PATH)
+    data = pd.read_csv(data_path)
     required = FEATURE_COLUMNS + [TARGET_COLUMN]
     missing = [column for column in required if column not in data.columns]
     if missing:
@@ -71,7 +79,19 @@ def _load_training_frame() -> pd.DataFrame:
 
 
 def _setup_mlflow() -> str:
-    """Point MLflow at a local SQLite file so the Model Registry works offline."""
+    """Use the Azure ML workspace when this run was submitted there.
+
+    A normal laptop run keeps the local SQLite file so the dashboard does not
+    need a cloud connection.
+    """
+    if _running_in_azure_ml():
+        # azureml-mlflow registers the azureml:// tracking scheme with MLflow.
+        import azureml.mlflow  # noqa: F401
+
+        tracking_uri = os.environ.get("MLFLOW_TRACKING_URI", "azureml")
+        mlflow.set_experiment(EXPERIMENT_NAME)
+        return tracking_uri
+
     database = (ROOT / "mlflow.db").resolve()
     # Spaces must stay as spaces. Encoding them makes SQLite look for a
     # folder named with "%20", which does not exist.
@@ -130,8 +150,9 @@ def _register_model(model_uri: str) -> str | None:
     return str(version.version)
 
 
-def train() -> dict:
-    data = _load_training_frame()
+def train(data_path: Path | None = None, model_dir: Path | None = None) -> dict:
+    data_path = Path(data_path) if data_path else DATA_PATH
+    data = _load_training_frame(data_path)
     features = data[FEATURE_COLUMNS].copy()
     target = data[TARGET_COLUMN].astype(int)
 
@@ -160,6 +181,10 @@ def train() -> dict:
 
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
     joblib.dump(model, MODEL_PATH)
+    if model_dir is not None:
+        model_dir = Path(model_dir)
+        model_dir.mkdir(parents=True, exist_ok=True)
+        joblib.dump(model, model_dir / "irrigation_rf_model.joblib")
 
     metrics = {
         "model_name": REGISTERED_MODEL_NAME,
@@ -213,7 +238,7 @@ def train() -> dict:
             mlflow.log_metric(f"importance_{name}", float(value))
 
         mlflow.set_tag("data_source", "simulated")
-        mlflow.set_tag("deployment", "local_laptop")
+        mlflow.set_tag("deployment", "azure_ml" if _running_in_azure_ml() else "local_laptop")
         mlflow.set_tag("task", "irrigation_required_classification")
 
         mlflow.log_dict(
@@ -225,7 +250,7 @@ def train() -> dict:
         )
         if INFO_PATH.is_file():
             mlflow.log_artifact(str(INFO_PATH), artifact_path="dataset")
-        mlflow.log_artifact(str(DATA_PATH), artifact_path="dataset")
+        mlflow.log_artifact(str(data_path), artifact_path="dataset")
 
         signature = infer_signature(x_train, model.predict(x_train))
         mlflow.sklearn.log_model(
@@ -241,6 +266,10 @@ def train() -> dict:
         metrics["mlflow_tracking_uri"] = tracking_uri
 
     METRICS_PATH.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+    if model_dir is not None:
+        (Path(model_dir) / "metrics.json").write_text(
+            json.dumps(metrics, indent=2), encoding="utf-8"
+        )
     _print_report(metrics, matrix)
     return metrics
 
@@ -269,14 +298,29 @@ def _print_report(metrics: dict, matrix) -> None:
             f"(run {metrics['mlflow_run_id']})."
         )
     print("")
-    print("The dashboard loads the joblib file and does not need MLflow to stay open.")
-    print("To inspect the experiment and registered model, from this folder run:")
-    print(
-        "  .\\.venv\\Scripts\\python.exe -m mlflow ui "
-        "--backend-store-uri sqlite:///mlflow.db --host 127.0.0.1 --port 5000"
+    if _running_in_azure_ml():
+        print("This run was tracked in the Azure Machine Learning workspace.")
+        print("Open the workspace in Azure ML Studio to see the experiment and model.")
+    else:
+        print("The dashboard loads the joblib file and does not need MLflow to stay open.")
+        print("To inspect the local experiment, from this folder run:")
+        print(
+            "  .\\.venv\\Scripts\\python.exe -m mlflow ui "
+            "--backend-store-uri sqlite:///mlflow.db --host 127.0.0.1 --port 5000"
+        )
+        print("Then open http://127.0.0.1:5000")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Train the irrigation classifier.")
+    parser.add_argument("--data", default=None, help="CSV path. Defaults to data/agriculture_sensor_data.csv.")
+    parser.add_argument("--model-dir", default=None, help="Extra folder for the saved model, used by Azure ML outputs.")
+    args = parser.parse_args()
+    train(
+        data_path=Path(args.data) if args.data else None,
+        model_dir=Path(args.model_dir) if args.model_dir else None,
     )
-    print("Then open http://127.0.0.1:5000")
 
 
 if __name__ == "__main__":
-    train()
+    main()

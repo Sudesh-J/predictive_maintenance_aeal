@@ -1,0 +1,12 @@
+{
+  "subscription_name": "Azure for Students",
+  "resource_group": "AEAL_HUB",
+  "workspace_name": "mlw-aeal-irrigation",
+  "location": "uaenorth",
+  "model_name": "smart-agri-irrigation-predictor",
+  "model_version": "1",
+  "job_name": "sleepy_hamster_zj42xxk8q9",
+  "experiment_name": "smart_agriculture_irrigation",
+  "endpoint_name": "aeal-irrig-score",
+  "deployment_name": "blue"
+}
